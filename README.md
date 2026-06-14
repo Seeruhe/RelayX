@@ -2,6 +2,8 @@
 
 This repository implements the first executable slice from `proxy-control-dev-plan-v0.1.md` without local GPU or local model dependencies. AI/BYOM is intentionally deferred to API-key backed P1 integrations.
 
+![Proxy Control P0 Architecture](images/proxy-control-readme-architecture.png)
+
 ## What exists now
 
 - Rust workspace with `domain`, `compiler-xray`, `runner`, `subscription`, and `control-plane` crates.
