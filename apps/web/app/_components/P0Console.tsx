@@ -608,6 +608,14 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
     if (token) setSubscriptionToken(token);
   }
 
+  async function rotateToken() {
+    const result = await run('Rotate subscription token', () =>
+      api<Record<string, unknown>>(`/subscriptions/${profileId}/tokens/rotate`, { method: 'POST' }),
+    );
+    const token = readString(result, 'token');
+    if (token) setSubscriptionToken(token);
+  }
+
   async function recordUsage() {
     const result = await run('Record usage sample', () =>
       api<JsonValue>(`/runner/nodes/${nodeId}/usage`, {
@@ -1037,6 +1045,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               action={
                 <div className="button-row compact-row">
                   <button type="button" onClick={issueToken}>Issue token</button>
+                  <button type="button" onClick={rotateToken}>Rotate token</button>
                   <button type="button" onClick={fetchSubscription}>Fetch subscription</button>
                 </div>
               }
