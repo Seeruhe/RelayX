@@ -29,6 +29,7 @@ test('P0 console contains real browser operations for the control-plane flow', (
     '/profiles',
     '/clients',
     '/deployments/compile',
+    '/deployments',
     '/deployments/${deployment.deploymentId}/health',
     '/artifacts/${deployment.artifactId}/bytes',
     '/subscriptions/${profileId}',
@@ -46,6 +47,7 @@ test('P0 console contains real browser operations for the control-plane flow', (
     '/system/capabilities',
     'Create dev deployment',
     'Refresh evidence',
+    'Refresh deployment inventory',
     'Fetch subscription',
     'Read capabilities',
     'Credential kind',
@@ -96,6 +98,7 @@ test('dashboard uses a Vercel-style workbench with a Claude-style operator artif
     'wired to backend endpoint',
     'Profile inventory',
     'Client inventory',
+    'Deployment inventory',
     'Node heartbeat and command queue',
     'xray-core',
   ]) {

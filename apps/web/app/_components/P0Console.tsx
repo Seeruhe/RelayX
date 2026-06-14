@@ -86,6 +86,19 @@ type ClientInventoryResponse = {
   clients: ClientInventoryItem[];
 };
 
+type DeploymentInventoryItem = {
+  deployment_id: string;
+  node_id: string;
+  profile_id: string;
+  compiled_config_artifact_id: string;
+  status: string;
+  created_at: string;
+};
+
+type DeploymentInventoryResponse = {
+  deployments: DeploymentInventoryItem[];
+};
+
 type TopologyData = {
   kicker: string;
   title: string;
@@ -167,6 +180,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
   const [registrationTokens, setRegistrationTokens] = useState<RegistrationTokenItem[]>([]);
   const [profiles, setProfiles] = useState<ProfileInventoryItem[]>([]);
   const [clients, setClients] = useState<ClientInventoryItem[]>([]);
+  const [deployments, setDeployments] = useState<DeploymentInventoryItem[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [events, setEvents] = useState<ConsoleEvent[]>([]);
   const [subscription, setSubscription] = useState('');
@@ -230,6 +244,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
     void refreshRegistrationTokens(false);
     void refreshProfiles(false);
     void refreshClients(false);
+    void refreshDeployments(false);
   }, []);
 
   function push(label: string, status: ConsoleEvent['status'], detail: unknown) {
@@ -427,7 +442,17 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
     });
     setStore('registered');
     push('DeploymentPlan', 'info', plan);
+    await refreshDeployments(false);
     return result;
+  }
+
+  async function refreshDeployments(logActivity = true) {
+    const load = async () => {
+      const result = await api<DeploymentInventoryResponse>('/deployments');
+      setDeployments(result.deployments);
+      return result;
+    };
+    return logActivity ? run('Refresh deployment inventory', load) : load().catch(() => undefined);
   }
 
   async function refreshDeployment() {
@@ -911,6 +936,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
                   <button disabled={!deployment || Boolean(busy)} onClick={() => recordDeploymentHealth('unhealthy')} type="button">Unhealthy sample</button>
                   <button disabled={!deployment || Boolean(busy)} onClick={advanceDeployment} type="button">Advance</button>
                   <button disabled={!deployment || Boolean(busy)} onClick={rollbackDeployment} type="button">Rollback</button>
+                  <button onClick={() => refreshDeployments()} type="button">Refresh deployments</button>
                 </div>
               }
             />
@@ -918,6 +944,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               rows={[
                 ['Deployment ID', deployment?.deploymentId || 'none', deploymentStatus],
                 ['Artifact SHA', artifactShort, deployment?.artifactId || 'none'],
+                ['Deployment inventory', '/deployments', deployments.length ? `${deployments.length} loaded` : 'empty'],
                 ['Rollout action', readString(rolloutAction, 'action') || 'none', rolloutAction ? 'loaded' : 'not loaded'],
               ]}
             />
@@ -928,6 +955,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               <JsonBlock title="Rollback pointer" value={deployment?.rollbackPointer || { status: 'not loaded yet' }} />
               <JsonBlock title="Rollout action" value={rolloutAction || { status: 'not loaded yet' }} />
               <JsonBlock title="Runner result count" value={runnerResultCount || { status: 'not loaded yet' }} />
+              <JsonBlock title="Deployment inventory" value={deployments.length ? deployments : { status: 'no deployments loaded' }} />
             </div>
             {deployment?.artifactPreview ? <pre className="artifact-preview">{deployment.artifactPreview}</pre> : null}
           </section>

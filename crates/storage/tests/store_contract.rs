@@ -69,6 +69,10 @@ async fn memory_store_records_p0_flow_and_builds_subscription_view() {
         ))
         .await
         .unwrap();
+    let deployments = store.list_deployment_plans().await.unwrap();
+    assert_eq!(deployments.len(), 1);
+    assert_eq!(deployments[0].deployment_id, "dep-a");
+    assert_eq!(deployments[0].profile_id, "profile-a");
 
     assert_eq!(store.audit_count().await.unwrap(), 6);
     assert_eq!(store.outbox_count().await.unwrap(), 6);

@@ -65,6 +65,7 @@ pub trait ProxyStore: Send + Sync {
     async fn artifact_bytes(&self, artifact_id: &str) -> StoreResult<Vec<u8>>;
     async fn artifact_bytes_by_sha256(&self, sha256: &str) -> StoreResult<Vec<u8>>;
     async fn record_deployment_plan(&self, deployment: DeploymentPlanRecord) -> StoreResult<()>;
+    async fn list_deployment_plans(&self) -> StoreResult<Vec<DeploymentPlanRecord>>;
     async fn idempotency_response(
         &self,
         tenant_id: &str,
@@ -900,6 +901,18 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub async fn list_deployment_plans(&self) -> StoreResult<Vec<DeploymentPlanRecord>> {
+        let state = self.state.lock().await;
+        let mut deployments = state.deployments.values().cloned().collect::<Vec<_>>();
+        deployments.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then(left.deployment_id.cmp(&right.deployment_id))
+        });
+        Ok(deployments)
+    }
+
     pub async fn idempotency_response(
         &self,
         _tenant_id: &str,
@@ -1534,6 +1547,9 @@ impl ProxyStore for MemoryStore {
     }
     async fn record_deployment_plan(&self, deployment: DeploymentPlanRecord) -> StoreResult<()> {
         MemoryStore::record_deployment_plan(self, deployment).await
+    }
+    async fn list_deployment_plans(&self) -> StoreResult<Vec<DeploymentPlanRecord>> {
+        MemoryStore::list_deployment_plans(self).await
     }
     async fn idempotency_response(
         &self,
@@ -2252,6 +2268,30 @@ impl PostgresStore {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn list_deployment_plans(&self) -> StoreResult<Vec<DeploymentPlanRecord>> {
+        let rows = sqlx::query(
+            r#"SELECT d.tenant_id, d.id AS deployment_id, d.node_id,
+                      pv.profile_id, d.compiled_config_artifact_id, d.created_at
+               FROM deployments d
+               JOIN profile_versions pv ON pv.id = d.profile_version_id
+               ORDER BY d.created_at DESC, d.id ASC"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(DeploymentPlanRecord {
+                    tenant_id: row.try_get("tenant_id")?,
+                    deployment_id: row.try_get("deployment_id")?,
+                    node_id: row.try_get("node_id")?,
+                    profile_id: row.try_get("profile_id")?,
+                    compiled_config_artifact_id: row.try_get("compiled_config_artifact_id")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn idempotency_response(
@@ -3311,6 +3351,9 @@ impl ProxyStore for PostgresStore {
     }
     async fn record_deployment_plan(&self, deployment: DeploymentPlanRecord) -> StoreResult<()> {
         PostgresStore::record_deployment_plan(self, deployment).await
+    }
+    async fn list_deployment_plans(&self) -> StoreResult<Vec<DeploymentPlanRecord>> {
+        PostgresStore::list_deployment_plans(self).await
     }
     async fn idempotency_response(
         &self,

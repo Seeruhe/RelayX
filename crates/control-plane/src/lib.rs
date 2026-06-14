@@ -178,6 +178,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/clients", get(list_clients).post(create_client))
         .route("/clients/{client_id}/quota", get(get_client_quota))
         .route("/clients/{client_id}/expiry", get(get_client_expiry))
+        .route("/deployments", get(list_deployments))
         .route("/deployments/compile", post(compile_deployment))
         .route("/deployments/{deployment_id}", get(get_deployment))
         .route(
@@ -955,6 +956,44 @@ struct CompileDeploymentResponse {
     outbox_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct DeploymentInventoryResponse {
+    deployments: Vec<DeploymentInventoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeploymentInventoryItem {
+    deployment_id: String,
+    node_id: String,
+    profile_id: String,
+    compiled_config_artifact_id: String,
+    status: String,
+    created_at: chrono::DateTime<Utc>,
+}
+
+async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
+    let plans = match state.store.list_deployment_plans().await {
+        Ok(plans) => plans,
+        Err(error) => return to_http_error(error).into_response(),
+    };
+    let mut deployments = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let status = match state.store.deployment_status(&plan.deployment_id).await {
+            Ok(status) => deployment_status_label(&status),
+            Err(error) => return to_http_error(error).into_response(),
+        };
+        deployments.push(DeploymentInventoryItem {
+            deployment_id: plan.deployment_id,
+            node_id: plan.node_id,
+            profile_id: plan.profile_id,
+            compiled_config_artifact_id: plan.compiled_config_artifact_id,
+            status,
+            created_at: plan.created_at,
+        });
+    }
+    Json(DeploymentInventoryResponse { deployments }).into_response()
+}
+
 async fn compile_deployment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1601,6 +1640,16 @@ fn credential_status_label(status: &domain::CredentialStatus) -> String {
         domain::CredentialStatus::Active => "active",
         domain::CredentialStatus::Revoked => "revoked",
         domain::CredentialStatus::Expired => "expired",
+    }
+    .into()
+}
+
+fn deployment_status_label(status: &DeploymentStatus) -> String {
+    match status {
+        DeploymentStatus::Pending => "Pending",
+        DeploymentStatus::Succeeded => "Succeeded",
+        DeploymentStatus::Failed => "Failed",
+        DeploymentStatus::RolledBack => "RolledBack",
     }
     .into()
 }

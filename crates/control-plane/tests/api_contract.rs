@@ -283,6 +283,24 @@ async fn p0_api_registers_node_compiles_profile_creates_audit_and_subscription()
         .oneshot(
             Request::builder()
                 .method("GET")
+                .uri("/deployments")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let deployments: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(deployments["deployments"][0]["node_id"], "node-a");
+    assert_eq!(deployments["deployments"][0]["profile_id"], "profile-a");
+    assert_eq!(deployments["deployments"][0]["status"], "Pending");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
                 .uri(format!(
                     "/artifacts/{}/bytes",
                     deployment["artifact"]["id"].as_str().unwrap()
