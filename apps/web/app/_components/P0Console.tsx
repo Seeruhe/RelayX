@@ -739,7 +739,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
                 }
               />
               <p className="muted">
-                One-click dev bootstrap: health check, node registration, profile, credential, deployment compile, then runner queue check. It creates sample control-plane records; it does not start xray-core by itself.
+                One-click dev setup: health check, node registration, profile, credential, deployment compile, then runner queue check. It creates sample control-plane records; it does not start xray-core by itself.
               </p>
               <RunbookSteps
                 artifactShort={artifactShort}
@@ -1119,7 +1119,7 @@ function TopologyCanvas({
         position: { x: 230, y: 310 },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
-        data: { kicker: 'Control state', title: 'Memory store', status: stateLabel(storeState), detail: 'in-memory now, Postgres later', tone: storeState === 'deployed' ? 'ok' : 'idle' },
+        data: { kicker: 'Runtime state', title: 'Volatile dev state', status: stateLabel(storeState), detail: 'resets on restart; Postgres when DATABASE_URL is set', tone: storeState === 'deployed' ? 'ok' : 'idle' },
       },
       {
         id: 'compiler',
