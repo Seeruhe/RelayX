@@ -232,8 +232,8 @@ async fn p0_api_registers_node_compiles_profile_creates_audit_and_subscription()
     let deployment: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(deployment["status"], "compiled");
     assert!(deployment["artifact"]["sha256"].as_str().unwrap().len() == 64);
-    assert_eq!(deployment["audit_count"], 6);
-    assert_eq!(deployment["outbox_count"], 6);
+    assert_eq!(deployment["audit_count"], 8);
+    assert_eq!(deployment["outbox_count"], 8);
 
     let response = app
         .clone()

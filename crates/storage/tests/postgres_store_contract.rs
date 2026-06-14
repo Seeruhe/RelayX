@@ -6,8 +6,8 @@ use domain::{
 use ed25519_dalek::SigningKey;
 use sqlx::{postgres::PgPoolOptions, Executor};
 use storage::{
-    DeploymentPlanRecord, HeartbeatRecord, NodeRecord, PostgresStore, ProfileRecord,
-    UsageSampleRecord,
+    DeploymentPlanRecord, HeartbeatRecord, NodeRecord, NodeRegistrationTokenRecord, PostgresStore,
+    ProfileRecord, UsageSampleRecord,
 };
 
 #[tokio::test]
@@ -43,6 +43,52 @@ async fn postgres_store_runs_p0_flow_against_migrated_schema() {
     assert_eq!(
         store.latest_heartbeat("node-pg").await.unwrap().node_id,
         "node-pg"
+    );
+    store
+        .create_node_registration_token(NodeRegistrationTokenRecord::new(
+            "tenant-pg",
+            "regtok-pg",
+            "node-reg-pg",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .node_registration_token("node-reg-pg")
+            .await
+            .unwrap()
+            .status,
+        "active"
+    );
+    let consumed = store
+        .consume_node_registration_token("node-reg-pg", "node-pg")
+        .await
+        .unwrap();
+    assert_eq!(consumed.used_by_node_id.as_deref(), Some("node-pg"));
+    store
+        .create_node_registration_token(NodeRegistrationTokenRecord::new(
+            "tenant-pg",
+            "regtok-pg-atomic",
+            "node-reg-pg-atomic",
+        ))
+        .await
+        .unwrap();
+    let consumed = store
+        .register_node_with_registration_token(
+            NodeRecord::new(
+                "tenant-pg",
+                "node-pg-atomic",
+                "node-pg-atomic.example",
+                "26.3.27",
+            ),
+            "node-reg-pg-atomic",
+        )
+        .await
+        .unwrap();
+    assert_eq!(consumed.used_by_node_id.as_deref(), Some("node-pg-atomic"));
+    assert_eq!(
+        store.list_node_registration_tokens().await.unwrap().len(),
+        2
     );
 
     store

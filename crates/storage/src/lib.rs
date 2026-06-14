@@ -6,7 +6,7 @@ use domain::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -19,6 +19,8 @@ use uuid::Uuid;
 pub enum StoreError {
     #[error("record not found: {0}")]
     NotFound(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("artifact sha256 mismatch: expected {expected}, got {actual}")]
     ArtifactShaMismatch { expected: String, actual: String },
     #[error("sqlx error: {0}")]
@@ -32,7 +34,26 @@ pub type StoreResult<T> = Result<T, StoreError>;
 #[async_trait]
 pub trait ProxyStore: Send + Sync {
     async fn register_node(&self, node: NodeRecord) -> StoreResult<()>;
+    async fn register_node_with_registration_token(
+        &self,
+        node: NodeRecord,
+        registration_token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord>;
     async fn list_nodes(&self) -> StoreResult<Vec<NodeRecord>>;
+    async fn create_node_registration_token(
+        &self,
+        token: NodeRegistrationTokenRecord,
+    ) -> StoreResult<()>;
+    async fn list_node_registration_tokens(&self) -> StoreResult<Vec<NodeRegistrationTokenRecord>>;
+    async fn node_registration_token(
+        &self,
+        token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord>;
+    async fn consume_node_registration_token(
+        &self,
+        token: &str,
+        node_id: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord>;
     async fn record_heartbeat(&self, heartbeat: HeartbeatRecord) -> StoreResult<()>;
     async fn latest_heartbeat(&self, node_id: &str) -> StoreResult<HeartbeatRecord>;
     async fn create_profile(&self, profile: ProfileRecord) -> StoreResult<()>;
@@ -166,6 +187,38 @@ impl NodeRecord {
 
     pub fn with_runner_result_public_key_hex(mut self, public_key_hex: impl Into<String>) -> Self {
         self.runner_result_public_key_hex = public_key_hex.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeRegistrationTokenRecord {
+    pub tenant_id: String,
+    pub token_id: String,
+    pub token: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub used_by_node_id: Option<String>,
+}
+
+impl NodeRegistrationTokenRecord {
+    pub fn new(tenant_id: &str, token_id: &str, token: &str) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            token_id: token_id.into(),
+            token: token.into(),
+            status: "active".into(),
+            created_at: Utc::now(),
+            consumed_at: None,
+            used_by_node_id: None,
+        }
+    }
+
+    pub fn mark_used(mut self, node_id: &str) -> Self {
+        self.status = "used".into();
+        self.consumed_at = Some(Utc::now());
+        self.used_by_node_id = Some(node_id.into());
         self
     }
 }
@@ -439,6 +492,7 @@ pub struct SubscriptionAccessLogRecord {
 #[derive(Default)]
 struct MemoryState {
     nodes: HashMap<String, NodeRecord>,
+    node_registration_tokens: HashMap<String, NodeRegistrationTokenRecord>,
     heartbeats: HashMap<String, HeartbeatRecord>,
     profiles: HashMap<String, ProfileRecord>,
     credentials_by_profile: HashMap<String, Vec<Credential>>,
@@ -489,11 +543,134 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub async fn register_node_with_registration_token(
+        &self,
+        node: NodeRecord,
+        registration_token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        let mut state = self.state.lock().await;
+        let existing = state
+            .node_registration_tokens
+            .values()
+            .find(|record| record.token == registration_token)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("node_registration_token".into()))?;
+        if existing.status != "active" {
+            return Err(StoreError::Conflict(
+                "registration token already consumed".into(),
+            ));
+        }
+
+        state.nodes.insert(node.node_id.clone(), node.clone());
+        Self::record(
+            &mut state,
+            &self.tenant_id,
+            "runner",
+            "node.registered",
+            "node",
+            &node.node_id,
+        );
+
+        let updated = existing.mark_used(&node.node_id);
+        state
+            .node_registration_tokens
+            .insert(updated.token_id.clone(), updated.clone());
+        Self::record(
+            &mut state,
+            &updated.tenant_id,
+            "runner",
+            "node_registration_token.used",
+            "node_registration_token",
+            &updated.token_id,
+        );
+        Ok(updated)
+    }
+
     pub async fn list_nodes(&self) -> StoreResult<Vec<NodeRecord>> {
         let state = self.state.lock().await;
         let mut nodes = state.nodes.values().cloned().collect::<Vec<_>>();
         nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         Ok(nodes)
+    }
+
+    pub async fn create_node_registration_token(
+        &self,
+        token: NodeRegistrationTokenRecord,
+    ) -> StoreResult<()> {
+        let mut state = self.state.lock().await;
+        if state
+            .node_registration_tokens
+            .values()
+            .any(|record| record.token == token.token)
+        {
+            return Ok(());
+        }
+        state
+            .node_registration_tokens
+            .insert(token.token_id.clone(), token.clone());
+        Self::record(
+            &mut state,
+            &token.tenant_id,
+            "admin",
+            "node_registration_token.issued",
+            "node_registration_token",
+            &token.token_id,
+        );
+        Ok(())
+    }
+
+    pub async fn list_node_registration_tokens(
+        &self,
+    ) -> StoreResult<Vec<NodeRegistrationTokenRecord>> {
+        let state = self.state.lock().await;
+        let mut tokens = state
+            .node_registration_tokens
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        tokens.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        Ok(tokens)
+    }
+
+    pub async fn node_registration_token(
+        &self,
+        token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        self.state
+            .lock()
+            .await
+            .node_registration_tokens
+            .values()
+            .find(|record| record.token == token)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("node_registration_token".into()))
+    }
+
+    pub async fn consume_node_registration_token(
+        &self,
+        token: &str,
+        node_id: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        let mut state = self.state.lock().await;
+        let existing = state
+            .node_registration_tokens
+            .values()
+            .find(|record| record.token == token)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound("node_registration_token".into()))?;
+        let updated = existing.mark_used(node_id);
+        state
+            .node_registration_tokens
+            .insert(updated.token_id.clone(), updated.clone());
+        Self::record(
+            &mut state,
+            &updated.tenant_id,
+            "runner",
+            "node_registration_token.used",
+            "node_registration_token",
+            &updated.token_id,
+        );
+        Ok(updated)
     }
 
     pub async fn record_heartbeat(&self, heartbeat: HeartbeatRecord) -> StoreResult<()> {
@@ -1254,8 +1431,37 @@ impl ProxyStore for MemoryStore {
     async fn register_node(&self, node: NodeRecord) -> StoreResult<()> {
         MemoryStore::register_node(self, node).await
     }
+    async fn register_node_with_registration_token(
+        &self,
+        node: NodeRecord,
+        registration_token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        MemoryStore::register_node_with_registration_token(self, node, registration_token).await
+    }
     async fn list_nodes(&self) -> StoreResult<Vec<NodeRecord>> {
         MemoryStore::list_nodes(self).await
+    }
+    async fn create_node_registration_token(
+        &self,
+        token: NodeRegistrationTokenRecord,
+    ) -> StoreResult<()> {
+        MemoryStore::create_node_registration_token(self, token).await
+    }
+    async fn list_node_registration_tokens(&self) -> StoreResult<Vec<NodeRegistrationTokenRecord>> {
+        MemoryStore::list_node_registration_tokens(self).await
+    }
+    async fn node_registration_token(
+        &self,
+        token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        MemoryStore::node_registration_token(self, token).await
+    }
+    async fn consume_node_registration_token(
+        &self,
+        token: &str,
+        node_id: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        MemoryStore::consume_node_registration_token(self, token, node_id).await
     }
     async fn record_heartbeat(&self, heartbeat: HeartbeatRecord) -> StoreResult<()> {
         MemoryStore::record_heartbeat(self, heartbeat).await
@@ -1520,6 +1726,97 @@ impl PostgresStore {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn register_node_with_registration_token(
+        &self,
+        node: NodeRecord,
+        registration_token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING")
+            .bind(&node.tenant_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"INSERT INTO nodes (id, tenant_id, display_name, status)
+               VALUES ($1, $2, $1, 'registered')
+               ON CONFLICT (id) DO UPDATE SET status = 'registered'"#,
+        )
+        .bind(&node.node_id)
+        .bind(&node.tenant_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO node_capabilities (node_id, xray_version, capabilities_json)
+               VALUES ($1, $2, $3)"#,
+        )
+        .bind(&node.node_id)
+        .bind(&node.xray_version)
+        .bind(serde_json::json!({"host": node.host, "xray_version": node.xray_version}))
+        .execute(&mut *tx)
+        .await?;
+        if !node.runner_result_public_key_hex.is_empty() {
+            sqlx::query(
+                r#"INSERT INTO node_identities (node_id, public_key, registered_at)
+                   VALUES ($1, $2, now())
+                   ON CONFLICT (node_id) DO UPDATE
+                   SET public_key = EXCLUDED.public_key,
+                       registered_at = COALESCE(node_identities.registered_at, EXCLUDED.registered_at)"#,
+            )
+            .bind(&node.node_id)
+            .bind(&node.runner_result_public_key_hex)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let token_row = sqlx::query(
+            r#"UPDATE node_registration_tokens
+               SET status = 'used', consumed_at = now(), used_by_node_id = $2
+               WHERE token = $1 AND status = 'active'
+               RETURNING id, tenant_id, token, status, created_at, consumed_at, used_by_node_id"#,
+        )
+        .bind(registration_token)
+        .bind(&node.node_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let token = match token_row {
+            Some(row) => node_registration_token_from_row(row)?,
+            None => {
+                let exists =
+                    sqlx::query("SELECT status FROM node_registration_tokens WHERE token = $1")
+                        .bind(registration_token)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                return match exists {
+                    Some(_) => Err(StoreError::Conflict(
+                        "registration token already consumed".into(),
+                    )),
+                    None => Err(StoreError::NotFound("node_registration_token".into())),
+                };
+            }
+        };
+
+        record_event_in_tx(
+            &mut tx,
+            &node.tenant_id,
+            "runner",
+            "node.registered",
+            "node",
+            &node.node_id,
+        )
+        .await?;
+        record_event_in_tx(
+            &mut tx,
+            &token.tenant_id,
+            "runner",
+            "node_registration_token.used",
+            "node_registration_token",
+            &token.token_id,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(token)
     }
 
     pub async fn record_heartbeat(&self, heartbeat: HeartbeatRecord) -> StoreResult<()> {
@@ -2434,6 +2731,102 @@ impl PostgresStore {
             .collect()
     }
 
+    pub async fn create_node_registration_token(
+        &self,
+        token: NodeRegistrationTokenRecord,
+    ) -> StoreResult<()> {
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING")
+            .bind(&token.tenant_id)
+            .execute(&self.pool)
+            .await?;
+        let result = sqlx::query(
+            r#"INSERT INTO node_registration_tokens
+               (id, tenant_id, token, status, created_at, consumed_at, used_by_node_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (token) DO NOTHING"#,
+        )
+        .bind(&token.token_id)
+        .bind(&token.tenant_id)
+        .bind(&token.token)
+        .bind(&token.status)
+        .bind(token.created_at)
+        .bind(token.consumed_at)
+        .bind(&token.used_by_node_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(());
+        }
+        self.record_event(
+            &token.tenant_id,
+            "admin",
+            "node_registration_token.issued",
+            "node_registration_token",
+            &token.token_id,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_node_registration_tokens(
+        &self,
+    ) -> StoreResult<Vec<NodeRegistrationTokenRecord>> {
+        let rows = sqlx::query(
+            r#"SELECT id, tenant_id, token, status, created_at, consumed_at, used_by_node_id
+               FROM node_registration_tokens
+               ORDER BY created_at ASC"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(node_registration_token_from_row)
+            .collect()
+    }
+
+    pub async fn node_registration_token(
+        &self,
+        token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        let row = sqlx::query(
+            r#"SELECT id, tenant_id, token, status, created_at, consumed_at, used_by_node_id
+               FROM node_registration_tokens
+               WHERE token = $1"#,
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("node_registration_token".into()))?;
+        node_registration_token_from_row(row)
+    }
+
+    pub async fn consume_node_registration_token(
+        &self,
+        token: &str,
+        node_id: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        let row = sqlx::query(
+            r#"UPDATE node_registration_tokens
+               SET status = 'used', consumed_at = now(), used_by_node_id = $2
+               WHERE token = $1 AND status = 'active'
+               RETURNING id, tenant_id, token, status, created_at, consumed_at, used_by_node_id"#,
+        )
+        .bind(token)
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("node_registration_token".into()))?;
+        let record = node_registration_token_from_row(row)?;
+        self.record_event(
+            &record.tenant_id,
+            "runner",
+            "node_registration_token.used",
+            "node_registration_token",
+            &record.token_id,
+        )
+        .await?;
+        Ok(record)
+    }
+
     pub async fn update_node_runner_result_public_key(
         &self,
         node_id: &str,
@@ -2751,8 +3144,37 @@ impl ProxyStore for PostgresStore {
     async fn register_node(&self, node: NodeRecord) -> StoreResult<()> {
         PostgresStore::register_node(self, node).await
     }
+    async fn register_node_with_registration_token(
+        &self,
+        node: NodeRecord,
+        registration_token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        PostgresStore::register_node_with_registration_token(self, node, registration_token).await
+    }
     async fn list_nodes(&self) -> StoreResult<Vec<NodeRecord>> {
         PostgresStore::list_nodes(self).await
+    }
+    async fn create_node_registration_token(
+        &self,
+        token: NodeRegistrationTokenRecord,
+    ) -> StoreResult<()> {
+        PostgresStore::create_node_registration_token(self, token).await
+    }
+    async fn list_node_registration_tokens(&self) -> StoreResult<Vec<NodeRegistrationTokenRecord>> {
+        PostgresStore::list_node_registration_tokens(self).await
+    }
+    async fn node_registration_token(
+        &self,
+        token: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        PostgresStore::node_registration_token(self, token).await
+    }
+    async fn consume_node_registration_token(
+        &self,
+        token: &str,
+        node_id: &str,
+    ) -> StoreResult<NodeRegistrationTokenRecord> {
+        PostgresStore::consume_node_registration_token(self, token, node_id).await
     }
     async fn record_heartbeat(&self, heartbeat: HeartbeatRecord) -> StoreResult<()> {
         PostgresStore::record_heartbeat(self, heartbeat).await
@@ -3064,6 +3486,52 @@ fn subscription_token_record(
 
 fn subscription_token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn node_registration_token_from_row(
+    row: sqlx::postgres::PgRow,
+) -> StoreResult<NodeRegistrationTokenRecord> {
+    Ok(NodeRegistrationTokenRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        token_id: row.try_get("id")?,
+        token: row.try_get("token")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        consumed_at: row.try_get("consumed_at")?,
+        used_by_node_id: row.try_get("used_by_node_id")?,
+    })
+}
+
+async fn record_event_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    actor: &str,
+    action: &str,
+    aggregate_type: &str,
+    aggregate_id: &str,
+) -> StoreResult<()> {
+    sqlx::query(
+        r#"INSERT INTO audit_events (tenant_id, actor, action, subject, payload_json)
+           VALUES ($1, $2, $3, $4, '{}')"#,
+    )
+    .bind(tenant_id)
+    .bind(actor)
+    .bind(action)
+    .bind(format!("{aggregate_type}:{aggregate_id}"))
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO event_outbox
+           (tenant_id, event_type, aggregate_type, aggregate_id, payload_json)
+           VALUES ($1, $2, $3, $4, '{}')"#,
+    )
+    .bind(tenant_id)
+    .bind(action)
+    .bind(aggregate_type)
+    .bind(aggregate_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn hour_bucket_start(sampled_at: DateTime<Utc>) -> DateTime<Utc> {

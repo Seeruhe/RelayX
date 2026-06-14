@@ -173,6 +173,74 @@ async fn memory_store_lists_registered_nodes_in_stable_order() {
 }
 
 #[tokio::test]
+async fn memory_store_tracks_node_registration_token_lifecycle() {
+    let store = MemoryStore::new("tenant-dev");
+    store
+        .create_node_registration_token(NodeRegistrationTokenRecord::new(
+            "tenant-dev",
+            "regtok-a",
+            "node-reg-a",
+        ))
+        .await
+        .unwrap();
+    store
+        .create_node_registration_token(NodeRegistrationTokenRecord::new(
+            "tenant-dev",
+            "regtok-a-duplicate",
+            "node-reg-a",
+        ))
+        .await
+        .unwrap();
+
+    let tokens = store.list_node_registration_tokens().await.unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].status, "active");
+    assert_eq!(
+        store
+            .node_registration_token("node-reg-a")
+            .await
+            .unwrap()
+            .token_id,
+        "regtok-a"
+    );
+
+    let consumed = store
+        .consume_node_registration_token("node-reg-a", "node-a")
+        .await
+        .unwrap();
+    assert_eq!(consumed.status, "used");
+    assert_eq!(consumed.used_by_node_id.as_deref(), Some("node-a"));
+    let rejected = store
+        .register_node_with_registration_token(
+            NodeRecord::new("tenant-dev", "node-b", "node-b.example", "26.3.27"),
+            "node-reg-a",
+        )
+        .await;
+    assert!(matches!(rejected, Err(StoreError::Conflict(_))));
+    assert!(store.node("node-b").await.is_err());
+
+    store
+        .create_node_registration_token(NodeRegistrationTokenRecord::new(
+            "tenant-dev",
+            "regtok-b",
+            "node-reg-b",
+        ))
+        .await
+        .unwrap();
+    let consumed = store
+        .register_node_with_registration_token(
+            NodeRecord::new("tenant-dev", "node-b", "node-b.example", "26.3.27"),
+            "node-reg-b",
+        )
+        .await
+        .unwrap();
+    assert_eq!(consumed.status, "used");
+    assert_eq!(consumed.used_by_node_id.as_deref(), Some("node-b"));
+    assert_eq!(store.node("node-b").await.unwrap().xray_version, "26.3.27");
+    assert_eq!(store.audit_count().await.unwrap(), 5);
+}
+
+#[tokio::test]
 async fn postgres_store_can_be_constructed_without_connecting_for_repository_wiring() {
     let store =
         PostgresStore::connect_lazy("postgres://proxy:proxy@localhost:5432/proxy_control").unwrap();

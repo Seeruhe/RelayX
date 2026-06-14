@@ -35,6 +35,16 @@ CREATE TABLE node_identities (
   registered_at timestamptz
 );
 
+CREATE TABLE node_registration_tokens (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id),
+  token text NOT NULL UNIQUE,
+  status text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  consumed_at timestamptz,
+  used_by_node_id text REFERENCES nodes(id)
+);
+
 CREATE TABLE node_capabilities (
   id bigserial PRIMARY KEY,
   node_id text NOT NULL REFERENCES nodes(id),
