@@ -1,0 +1,9 @@
+/target/
+/node_modules/
+/apps/*/node_modules/
+/.data/
+.env
+.env.*
+!.env.example
+/apps/*/.next/
+/apps/*/tsconfig.tsbuildinfo

@@ -1,0 +1,25 @@
+[package]
+name = "control-plane"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+hex.workspace = true
+http-body-util.workspace = true
+compiler-xray = { path = "../compiler-xray" }
+domain = { path = "../domain" }
+ed25519-dalek.workspace = true
+runner = { path = "../runner" }
+sha2.workspace = true
+storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+subscription = { path = "../subscription" }
+tokio.workspace = true
+tower.workspace = true
+uuid.workspace = true

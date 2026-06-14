@@ -1,0 +1,25 @@
+[package]
+name = "runner"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+domain = { path = "../domain" }
+ed25519-dalek.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+http-body-util.workspace = true
+tower.workspace = true
+ed25519-dalek.workspace = true

@@ -1,0 +1,43 @@
+[workspace]
+members = [
+  "crates/domain",
+  "crates/compiler-xray",
+  "crates/runner",
+  "crates/storage",
+  "crates/subscription",
+  "crates/control-plane",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
+hex = "0.4"
+http-body-util = "0.1"
+percent-encoding = "2"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json"] }
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "time", "sync"] }
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+
+[profile.dev]
+debug = 1
+incremental = true
