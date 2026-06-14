@@ -69,7 +69,7 @@ type TopologyData = {
 };
 
 type TopologyNode = Node<TopologyData, 'proxyNode'>;
-type ControlState = 'empty' | 'ready' | 'deployed';
+type ControlState = 'unregistered' | 'registered' | 'deployed';
 
 const defaultNodeId = 'node-a';
 const defaultProfileId = 'profile-a';
@@ -129,7 +129,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
   const [expiresAt, setExpiresAt] = useState('2026-12-31T00:00:00Z');
   const [deployment, setDeployment] = useState<DeploymentState | null>(null);
   const [health, setHealth] = useState<string>('checking');
-  const [store, setStore] = useState<ControlState>('empty');
+  const [store, setStore] = useState<ControlState>('unregistered');
   const [nodes, setNodes] = useState<NodeInventoryItem[]>([]);
   const [registrationTokens, setRegistrationTokens] = useState<RegistrationTokenItem[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -145,24 +145,28 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
   const [usageRollups, setUsageRollups] = useState<Record<string, JsonValue>>({});
   const [rolloutAction, setRolloutAction] = useState<JsonValue | null>(null);
 
-  const runnerCommand = useMemo(
-    () =>
-      [
-        'CONTROL_PLANE_BASE_URL=http://127.0.0.1:18080 \\',
-        `RUNNER_NODE_ID=${nodeId} \\`,
-        'RUNNER_API_TOKEN=dev-runner-token \\',
-        'RUNNER_WORK_DIR=.data/runner \\',
-        'RUNNER_XRAY_BIN=/root/xray-bin/xray \\',
-        'RUNNER_ONCE=1 \\',
-        './target/debug/runner',
-      ].join('\n'),
-    [nodeId],
-  );
-
   const deploymentStatus = deployment?.status || 'none';
   const artifactShort = deployment?.artifactSha ? deployment.artifactSha.slice(0, 12) : 'none';
   const selectedNode = nodes.find((node) => node.node_id === nodeId);
+  const selectedNodeRegistered = Boolean(selectedNode);
+  const activeRegistrationToken = registrationTokens.find((token) => token.status === 'active');
   const controlStateLabel = stateLabel(store);
+  const runnerCommand = useMemo(() => {
+    const lines = [
+      'CONTROL_PLANE_BASE_URL=http://127.0.0.1:18080 \\',
+      `RUNNER_NODE_ID=${nodeId} \\`,
+      'RUNNER_API_TOKEN=dev-runner-token \\',
+    ];
+    if (!selectedNodeRegistered) {
+      lines.push(`NODE_REGISTRATION_TOKEN=${registrationToken} \\`);
+      lines.push(`RUNNER_XRAY_VERSION=${xrayVersion} \\`);
+    }
+    lines.push('RUNNER_WORK_DIR=.data/runner \\');
+    lines.push('RUNNER_XRAY_BIN=/root/xray-bin/xray \\');
+    lines.push('RUNNER_ONCE=1 \\');
+    lines.push('./target/debug/runner');
+    return lines.join('\n');
+  }, [nodeId, registrationToken, selectedNodeRegistered, xrayVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,7 +246,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
         }),
       }),
     );
-    setStore('ready');
+    setStore('registered');
     await refreshNodes(false);
     await refreshRegistrationTokens(false);
     return result;
@@ -253,9 +257,9 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       const result = await api<NodeInventoryResponse>('/nodes');
       setNodes(result.nodes);
       if (result.nodes.some((node) => node.node_id === nodeId)) {
-        setStore((current) => (current === 'deployed' ? current : 'ready'));
+        setStore((current) => (current === 'deployed' ? current : 'registered'));
       } else {
-        setStore('empty');
+        setStore('unregistered');
       }
       return result;
     };
@@ -333,7 +337,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       artifactSha,
       status: 'compiled',
     });
-    setStore('ready');
+    setStore('registered');
     push('DeploymentPlan', 'info', plan);
     return result;
   }
@@ -527,7 +531,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       if (!message.includes('registration token already consumed')) {
         throw error;
       }
-      setStore('ready');
+      setStore('registered');
       push('Use existing node registration', 'info', message);
       await fetchHeartbeat().catch(() => undefined);
     }
@@ -547,7 +551,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
         </div>
         <div className="header-actions">
           <StatusPill label="API" value={health} tone={health === 'ok' ? 'ok' : 'warn'} />
-          <StatusPill label="Node" value={controlStateLabel} tone={store === 'deployed' ? 'ok' : store === 'ready' ? 'info' : 'warn'} />
+          <StatusPill label="Node" value={controlStateLabel} tone={store === 'deployed' ? 'ok' : store === 'registered' ? 'info' : 'warn'} />
           <StatusPill label="Deploy" value={deploymentStatus} tone={deploymentStatus === 'Succeeded' ? 'ok' : 'idle'} />
           <StatusProbe value={health} onClick={checkHealth} />
         </div>
@@ -625,6 +629,23 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
             <Field label="Xray version" value={xrayVersion} onChange={setXrayVersion} />
             <Field label="Registration token" value={registrationToken} onChange={setRegistrationToken} wide />
           </FormPanel>
+          <section className="data-panel">
+            <PanelHeader eyebrow="Add path" title="How nodes join" />
+            <ResourceTable
+              rows={[
+                ['Browser registration', 'Register node', selectedNode ? 'already registered' : 'uses /nodes/register'],
+                [
+                  'Runner self-registration',
+                  'NODE_REGISTRATION_TOKEN',
+                  selectedNode ? 'omit after registration' : activeRegistrationToken ? 'active token available' : 'issue a token first',
+                ],
+                ['One-time token', activeRegistrationToken?.token || registrationToken, tokenStatus(registrationTokens, activeRegistrationToken?.token || registrationToken)],
+              ]}
+            />
+            <p className="muted offset-top">
+              Nodes are runner identities, not proxy clients. The browser can register a dev node for testing; in the real flow the runner starts with a one-time token, registers itself, then polls signed deployment commands.
+            </p>
+          </section>
           <section className="data-panel span-2">
             <PanelHeader
               eyebrow="Runner evidence"
@@ -660,7 +681,9 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
           </section>
           <section className="data-panel span-3">
             <PanelHeader eyebrow="Runner command" title="Apply queued deployment" />
-            <p className="muted">Run this on the remote machine after compile. The browser controls the API; it does not spawn server processes.</p>
+            <p className="muted">
+              Run this on the remote machine after compile. When the node is not registered, the command includes the one-time registration token; after registration it only polls, tests, switches, and reports evidence.
+            </p>
             <pre className="codeblock">{runnerCommand}</pre>
           </section>
         </section>
@@ -839,7 +862,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       ) : null}
 
       <aside className="activity-dock">
-        <PanelHeader eyebrow="Activity" title="Recent API calls" action={<button onClick={checkHealth} type="button">Ping</button>} />
+        <PanelHeader eyebrow="Activity" title="Recent API calls" action={<StatusProbe value={health} onClick={checkHealth} />} />
         <EventList events={events} />
       </aside>
     </div>
@@ -1047,7 +1070,7 @@ function RunbookSteps({
 }) {
   const steps = [
     ['01', 'Health', health === 'ok' ? 'API reachable' : 'Not checked'],
-    ['02', 'Register', store === 'empty' ? 'Node not registered' : nodeId],
+    ['02', 'Register', store === 'unregistered' ? 'Node not registered' : nodeId],
     ['03', 'Profile', profileId],
     ['04', 'Credential', clientId],
     ['05', 'Compile', artifactShort],
@@ -1068,7 +1091,7 @@ function RunbookSteps({
 
 function stateLabel(state: ControlState) {
   if (state === 'deployed') return 'Deployed';
-  if (state === 'ready') return 'Registered';
+  if (state === 'registered') return 'Registered';
   return 'Not registered';
 }
 
