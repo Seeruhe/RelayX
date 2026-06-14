@@ -46,6 +46,7 @@ test('P0 console contains real browser operations for the control-plane flow', (
     '/usage/credentials/${clientId}/rollups/latest?bucket=hour',
     '/system/capabilities',
     'Create dev deployment',
+    'One-click dev bootstrap',
     'Refresh evidence',
     'Refresh deployment inventory',
     'Fetch subscription',
@@ -55,9 +56,16 @@ test('P0 console contains real browser operations for the control-plane flow', (
     'Trojan password',
     'Refresh profile inventory',
     'Refresh client inventory',
+    'ApiError',
+    'Runner command not authorized',
+    'No profiles yet',
+    'No clients yet',
+    'No deployments yet',
+    'inventoryStatus',
   ]) {
     assert(source.includes(snippet), `P0Console missing ${snippet}`);
   }
+  assert(!source.includes(": 'empty'"), 'inventory statuses should explain empty state instead of showing raw empty');
 });
 
 test('dashboard uses a Vercel-style workbench with a Claude-style operator artifact rail', () => {

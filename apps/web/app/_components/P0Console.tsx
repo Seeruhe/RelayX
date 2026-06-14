@@ -99,6 +99,16 @@ type DeploymentInventoryResponse = {
   deployments: DeploymentInventoryItem[];
 };
 
+class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly statusText: string,
+    readonly body: string,
+  ) {
+    super(body || `${status} ${statusText}`);
+  }
+}
+
 type TopologyData = {
   kicker: string;
   title: string;
@@ -129,7 +139,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(text || `${response.status} ${response.statusText}`);
+    throw new ApiError(response.status, response.statusText, text);
   }
   if (!text) return undefined as T;
   const contentType = response.headers.get('content-type') || '';
@@ -266,8 +276,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       push(label, 'ok', result ?? 'ok');
       return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      push(label, 'error', message);
+      push(label, 'error', errorDetail(error));
       throw error;
     } finally {
       setBusy(null);
@@ -521,10 +530,17 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
 
   async function fetchRunnerCommand() {
     const result = await run('Fetch next runner command', async () => {
-      const command = await api<JsonValue | undefined>(`/runner/nodes/${nodeId}/commands/next?last_sequence=0`, {
-        headers: { 'x-runner-token': 'dev-runner-token' },
-      });
-      return command || { status: 'no queued command' };
+      try {
+        const command = await api<JsonValue | undefined>(`/runner/nodes/${nodeId}/commands/next?last_sequence=0`, {
+          headers: { 'x-runner-token': 'dev-runner-token' },
+        });
+        return command || { status: 'no queued command', next_step: 'Compile a deployment, then run the runner once command.' };
+      } catch (error) {
+        if (error instanceof ApiError && [401, 403, 404].includes(error.status)) {
+          return runnerCommandBoundary(error, nodeId);
+        }
+        throw error;
+      }
     });
     setRunnerCommandEnvelope(result);
     return result;
@@ -721,7 +737,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
                 }
               />
               <p className="muted">
-                Creates the local dev path in order: health check, node registration, profile, credential, compile, runner command.
+                One-click dev bootstrap: health check, node registration, profile, credential, deployment compile, then runner queue check. It creates sample control-plane records; it does not start xray-core by itself.
               </p>
               <RunbookSteps
                 artifactShort={artifactShort}
@@ -799,7 +815,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
                 ['Host', selectedNode?.host || `${nodeId}.example`, selectedNode ? 'loaded from backend' : 'derived preview'],
                 ['Core', selectedNode?.xray_version || `xray ${xrayVersion}`, 'P0 runner target'],
                 ['Result key', shortHex(selectedRunnerResultKey), 'runner result signature verification'],
-                ['Command source', `/runner/nodes/${nodeId}/commands/next`, runnerCommandEnvelope ? 'loaded' : 'no pending command loaded'],
+                ['Command source', `/runner/nodes/${nodeId}/commands/next`, runnerCommandStatus(runnerCommandEnvelope, selectedNodeRegistered)],
                 ['Registration token', registrationToken, tokenStatus(registrationTokens, registrationToken)],
               ]}
             />
@@ -852,13 +868,13 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
                 ['VLESS REALITY', '/profiles/vless-reality', 'browser operation'],
                 ['Shadowsocks', '/profiles/shadowsocks', 'browser operation'],
                 ['Trojan', '/profiles/trojan', 'browser operation'],
-                ['Profile inventory', '/profiles', profiles.length ? `${profiles.length} loaded` : 'empty'],
+                ['Profile inventory', '/profiles', inventoryStatus(profiles.length, 'profile')],
                 ['Core', 'xray-core', 'verified locally'],
                 ['Later adapter', 'sing-box', 'kept behind compiler boundary'],
               ]}
             />
             <div className="offset-top">
-              <JsonBlock title="Profile inventory" value={profiles.length ? profiles : { status: 'no profiles loaded' }} />
+              <JsonBlock title="Profile inventory" value={profiles.length ? profiles : { status: 'No profiles yet', next_step: 'Create a profile before compiling a deployment.' }} />
             </div>
           </section>
         </section>
@@ -903,7 +919,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               rows={[
                 ['Client ID', clientId, 'credential'],
                 ['Credential kind', protocolLabel(profileProtocol), 'wired to /clients kind'],
-                ['Client inventory', '/clients', clients.length ? `${clients.length} loaded` : 'empty'],
+                ['Client inventory', '/clients', inventoryStatus(clients.length, 'client')],
                 ['Quota bytes', quotaBytes, quotaDecision ? 'decision loaded' : 'not loaded'],
                 ['Expires at', expiresAt, expiryDecision ? 'decision loaded' : 'not loaded'],
               ]}
@@ -913,7 +929,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               <JsonBlock title="Quota decision" value={quotaDecision || { status: 'not loaded' }} />
               <JsonBlock title="Expiry decision" value={expiryDecision || { status: 'not loaded' }} />
               <JsonBlock title="Usage rollups" value={Object.keys(usageRollups).length ? usageRollups : { status: 'not loaded' }} />
-              <JsonBlock title="Client inventory" value={clients.length ? clients : { status: 'no clients loaded' }} />
+              <JsonBlock title="Client inventory" value={clients.length ? clients : { status: 'No clients yet', next_step: 'Create a client credential for the selected profile.' }} />
             </div>
           </section>
         </section>
@@ -944,7 +960,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               rows={[
                 ['Deployment ID', deployment?.deploymentId || 'none', deploymentStatus],
                 ['Artifact SHA', artifactShort, deployment?.artifactId || 'none'],
-                ['Deployment inventory', '/deployments', deployments.length ? `${deployments.length} loaded` : 'empty'],
+                ['Deployment inventory', '/deployments', inventoryStatus(deployments.length, 'deployment')],
                 ['Rollout action', readString(rolloutAction, 'action') || 'none', rolloutAction ? 'loaded' : 'not loaded'],
               ]}
             />
@@ -955,7 +971,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               <JsonBlock title="Rollback pointer" value={deployment?.rollbackPointer || { status: 'not loaded yet' }} />
               <JsonBlock title="Rollout action" value={rolloutAction || { status: 'not loaded yet' }} />
               <JsonBlock title="Runner result count" value={runnerResultCount || { status: 'not loaded yet' }} />
-              <JsonBlock title="Deployment inventory" value={deployments.length ? deployments : { status: 'no deployments loaded' }} />
+              <JsonBlock title="Deployment inventory" value={deployments.length ? deployments : { status: 'No deployments yet', next_step: 'Compile a deployment after node, profile, and client exist.' }} />
             </div>
             {deployment?.artifactPreview ? <pre className="artifact-preview">{deployment.artifactPreview}</pre> : null}
           </section>
@@ -976,7 +992,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               }
             />
             <div className="artifact-split">
-              <JsonBlock title="Next runner command" value={runnerCommandEnvelope || { status: 'no pending command loaded' }} />
+              <JsonBlock title="Next runner command" value={runnerCommandEnvelope || { status: 'No runner command loaded', next_step: 'Register a node and compile a deployment, then fetch the next command.' }} />
               <JsonBlock title="Runner result count" value={runnerResultCount || { status: 'not loaded yet' }} />
             </div>
             <EventList events={events} />
@@ -1282,6 +1298,45 @@ function protocolLabel(protocol: ProxyProtocol) {
   if (protocol === 'shadowsocks') return 'Shadowsocks';
   if (protocol === 'trojan') return 'Trojan TLS';
   return 'VLESS REALITY';
+}
+
+function inventoryStatus(count: number, itemName: string) {
+  return count > 0 ? `${count} loaded` : `No ${itemName}s yet`;
+}
+
+function runnerCommandStatus(envelope: JsonValue | null, nodeRegistered: boolean) {
+  const status = readString(envelope, 'status');
+  if (status) return status;
+  return nodeRegistered ? 'ready to poll with runner token' : 'register node first';
+}
+
+function runnerCommandBoundary(error: ApiError, nodeId: string): Record<string, unknown> {
+  if (error.status === 404) {
+    return {
+      status: 'Node not registered',
+      http_status: error.status,
+      node_id: nodeId,
+      next_step: 'Create or register the node before polling the runner command queue.',
+    };
+  }
+  return {
+    status: 'Runner command not authorized',
+    http_status: error.status,
+    node_id: nodeId,
+    reason: 'Runner command polling is a runner-only API and requires a valid x-runner-token for this node.',
+    next_step: 'Keep RUNNER_API_TOKEN aligned with the control-plane token, then run the runner once command on the VPS.',
+  };
+}
+
+function errorDetail(error: unknown): Record<string, unknown> | string {
+  if (error instanceof ApiError) {
+    return {
+      status: error.status,
+      status_text: error.statusText,
+      body: error.body || 'No response body',
+    };
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function shortHex(value: string) {
