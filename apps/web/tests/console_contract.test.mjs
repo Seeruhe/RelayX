@@ -21,6 +21,7 @@ test('P0 console contains real browser operations for the control-plane flow', (
   for (const snippet of [
     '/nodes/register',
     '/nodes',
+    '/nodes/registration-tokens',
     '/profiles/vless-reality',
     '/clients',
     '/deployments/compile',
@@ -63,6 +64,7 @@ test('dashboard uses a Vercel-style workbench with a Claude-style operator artif
     'Create dev deployment',
     'Register runner node',
     'Refresh nodes',
+    'Issue token',
     'Node inventory',
     'A node is a VPS-side runner identity',
     'Runner queue and browser journal',

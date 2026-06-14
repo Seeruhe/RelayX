@@ -32,6 +32,23 @@ async fn node_registration_token_is_consumed_after_first_successful_registration
     let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(list["nodes"].as_array().unwrap().len(), 0);
 
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/nodes/registration-tokens")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let tokens: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(tokens["tokens"][0]["token"], "dev-registration-token");
+    assert_eq!(tokens["tokens"][0]["status"], "active");
+
     let first = app.clone().oneshot(Request::builder()
         .method("POST")
         .uri("/nodes/register")
@@ -57,6 +74,23 @@ async fn node_registration_token_is_consumed_after_first_successful_registration
     assert_eq!(list["nodes"][0]["node_id"], "node-first");
     assert_eq!(list["nodes"][0]["xray_version"], "1.8.8");
 
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/nodes/registration-tokens")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let tokens: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(tokens["tokens"][0]["status"], "used");
+    assert_eq!(tokens["tokens"][0]["used_by_node_id"], "node-first");
+
     let second = app.clone().oneshot(Request::builder()
         .method("POST")
         .uri("/nodes/register")
@@ -64,6 +98,31 @@ async fn node_registration_token_is_consumed_after_first_successful_registration
         .body(Body::from(json!({"registration_token":"dev-registration-token","node_id":"node-second","xray_version":"1.8.8"}).to_string()))
         .unwrap()).await.unwrap();
     assert_eq!(second.status(), StatusCode::CONFLICT);
+
+    let issued = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/nodes/registration-tokens")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::CREATED);
+    let body = issued.into_body().collect().await.unwrap().to_bytes();
+    let issued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let issued_token = issued["token"].as_str().unwrap();
+
+    let second = app.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/nodes/register")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"registration_token":issued_token,"node_id":"node-second","xray_version":"26.3.27"}).to_string()))
+        .unwrap()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]

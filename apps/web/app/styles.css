@@ -666,6 +666,10 @@ main {
   min-width: 0;
 }
 
+.field.wide-field {
+  grid-column: 1 / -1;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;

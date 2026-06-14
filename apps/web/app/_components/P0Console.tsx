@@ -49,6 +49,17 @@ type NodeInventoryResponse = {
   nodes: NodeInventoryItem[];
 };
 
+type RegistrationTokenItem = {
+  token_id: string;
+  token: string;
+  status: string;
+  used_by_node_id?: string | null;
+};
+
+type RegistrationTokenResponse = {
+  tokens: RegistrationTokenItem[];
+};
+
 type TopologyData = {
   kicker: string;
   title: string;
@@ -108,6 +119,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
   const [view, setView] = useState<View>(initialView);
   const [nodeId, setNodeId] = useState(defaultNodeId);
   const [xrayVersion, setXrayVersion] = useState('26.3.27');
+  const [registrationToken, setRegistrationToken] = useState('dev-registration-token');
   const [profileId, setProfileId] = useState(defaultProfileId);
   const [serverName, setServerName] = useState('example.com');
   const [clientId, setClientId] = useState(defaultClientId);
@@ -119,6 +131,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
   const [health, setHealth] = useState<string>('checking');
   const [store, setStore] = useState<ControlState>('empty');
   const [nodes, setNodes] = useState<NodeInventoryItem[]>([]);
+  const [registrationTokens, setRegistrationTokens] = useState<RegistrationTokenItem[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [events, setEvents] = useState<ConsoleEvent[]>([]);
   const [subscription, setSubscription] = useState('');
@@ -173,6 +186,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
 
   useEffect(() => {
     void refreshNodes(false);
+    void refreshRegistrationTokens(false);
   }, []);
 
   function push(label: string, status: ConsoleEvent['status'], detail: unknown) {
@@ -222,7 +236,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       api<JsonValue>('/nodes/register', {
         method: 'POST',
         body: JSON.stringify({
-          registration_token: 'dev-registration-token',
+          registration_token: registrationToken,
           node_id: nodeId,
           xray_version: xrayVersion,
         }),
@@ -230,6 +244,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
     );
     setStore('ready');
     await refreshNodes(false);
+    await refreshRegistrationTokens(false);
     return result;
   }
 
@@ -245,6 +260,31 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
       return result;
     };
     return logActivity ? run('Refresh node inventory', load) : load().catch(() => undefined);
+  }
+
+  async function refreshRegistrationTokens(logActivity = true) {
+    const load = async () => {
+      const result = await api<RegistrationTokenResponse>('/nodes/registration-tokens');
+      setRegistrationTokens(result.tokens);
+      const activeToken = result.tokens.find((token) => token.status === 'active');
+      if (activeToken && !result.tokens.some((token) => token.token === registrationToken && token.status === 'active')) {
+        setRegistrationToken(activeToken.token);
+      }
+      return result;
+    };
+    return logActivity ? run('Refresh registration tokens', load) : load().catch(() => undefined);
+  }
+
+  async function issueRegistrationToken() {
+    const result = await run('Issue node registration token', () =>
+      api<RegistrationTokenItem>('/nodes/registration-tokens', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }),
+    );
+    setRegistrationToken(result.token);
+    await refreshRegistrationTokens(false);
+    return result;
   }
 
   async function createProfile(event?: FormEvent) {
@@ -583,6 +623,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
           <FormPanel title="Register runner node" eyebrow="Node inventory" onSubmit={registerNode} busy={busy} submitLabel="Register node">
             <Field label="Node ID" value={nodeId} onChange={setNodeId} />
             <Field label="Xray version" value={xrayVersion} onChange={setXrayVersion} />
+            <Field label="Registration token" value={registrationToken} onChange={setRegistrationToken} wide />
           </FormPanel>
           <section className="data-panel span-2">
             <PanelHeader
@@ -591,6 +632,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
               action={
                 <div className="button-row compact-row">
                   <button onClick={() => refreshNodes()} type="button">Refresh nodes</button>
+                  <button onClick={issueRegistrationToken} type="button">Issue token</button>
                   <button onClick={sendHeartbeat} type="button">Send heartbeat</button>
                   <button onClick={fetchHeartbeat} type="button">Read heartbeat</button>
                   <button onClick={fetchRunnerCommand} type="button">Fetch next command</button>
@@ -603,7 +645,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
                 ['Host', selectedNode?.host || `${nodeId}.example`, selectedNode ? 'loaded from backend' : 'derived preview'],
                 ['Core', selectedNode?.xray_version || `xray ${xrayVersion}`, 'P0 runner target'],
                 ['Command source', `/runner/nodes/${nodeId}/commands/next`, runnerCommandEnvelope ? 'loaded' : 'no pending command loaded'],
-                ['Registration token', 'dev-registration-token', 'one-time token in dev mode'],
+                ['Registration token', registrationToken, tokenStatus(registrationTokens, registrationToken)],
               ]}
             />
             <p className="muted offset-top">
@@ -611,6 +653,7 @@ export function P0Console({ initialView = 'dashboard' }: { initialView?: View })
             </p>
             <div className="artifact-split offset-top">
               <JsonBlock title="Node inventory" value={nodes.length ? nodes : { status: 'no nodes registered' }} />
+              <JsonBlock title="Registration tokens" value={registrationTokens.length ? registrationTokens : { status: 'no registration tokens loaded' }} />
               <JsonBlock title="Latest heartbeat" value={latestHeartbeat || { status: 'not loaded yet' }} />
               <JsonBlock title="Next command envelope" value={runnerCommandEnvelope || { status: 'no pending command loaded' }} />
             </div>
@@ -1029,6 +1072,13 @@ function stateLabel(state: ControlState) {
   return 'Not registered';
 }
 
+function tokenStatus(tokens: RegistrationTokenItem[], tokenValue: string) {
+  const token = tokens.find((item) => item.token === tokenValue);
+  if (!token) return 'not loaded';
+  if (token.status === 'active') return 'active one-time token';
+  return token.used_by_node_id ? `used by ${token.used_by_node_id}` : token.status;
+}
+
 function PanelHeader({ eyebrow, title, action }: { eyebrow: string; title: string; action?: ReactNode }) {
   return (
     <div className="panel-header">
@@ -1097,9 +1147,19 @@ function FormPanel({
   );
 }
 
-function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function Field({
+  label,
+  value,
+  onChange,
+  wide = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  wide?: boolean;
+}) {
   return (
-    <label className="field">
+    <label className={`field ${wide ? 'wide-field' : ''}`}>
       <span>{label}</span>
       <input value={value} onChange={(event) => onChange(event.target.value)} />
     </label>

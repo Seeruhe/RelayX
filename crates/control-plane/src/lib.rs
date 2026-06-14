@@ -16,10 +16,7 @@ use domain::{
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use storage::{
     CredentialExpiryDecision, CredentialQuotaDecision, DeploymentHealthCheckRecord,
     DeploymentPlanRecord, HeartbeatRecord, MemoryStore, NodeRecord, PostgresStore, ProfileRecord,
@@ -27,17 +24,17 @@ use storage::{
 };
 use subscription::generate_subscription_artifact;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
-    registration_token: String,
     runner_api_token: String,
     tenant_id: String,
     store: Arc<dyn ProxyStore>,
     signing_key: Arc<SigningKey>,
     runner_result_verify_key: VerifyingKey,
     node_sequences: Arc<Mutex<HashMap<String, u64>>>,
-    consumed_registration_tokens: Arc<Mutex<HashSet<String>>>,
+    registration_tokens: Arc<Mutex<HashMap<String, RegistrationTokenRecord>>>,
     runner_results: Arc<Mutex<Vec<DeploymentResult>>>,
 }
 
@@ -83,15 +80,15 @@ impl AppState {
         tenant_id: impl Into<String>,
         store: Arc<dyn ProxyStore>,
     ) -> Self {
+        let registration_token = registration_token.into();
         Self {
-            registration_token: registration_token.into(),
             runner_api_token: "dev-runner-token".into(),
             tenant_id: tenant_id.into(),
             store,
             signing_key: Arc::new(dev_control_plane_signing_key()),
             runner_result_verify_key: dev_runner_result_verify_key(),
             node_sequences: Arc::new(Mutex::new(HashMap::new())),
-            consumed_registration_tokens: Arc::new(Mutex::new(HashSet::new())),
+            registration_tokens: seeded_registration_tokens(registration_token),
             runner_results: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -102,15 +99,15 @@ impl AppState {
         tenant_id: impl Into<String>,
         store: Arc<dyn ProxyStore>,
     ) -> Self {
+        let registration_token = registration_token.into();
         Self {
-            registration_token: registration_token.into(),
             runner_api_token: runner_api_token.into(),
             tenant_id: tenant_id.into(),
             store,
             signing_key: Arc::new(dev_control_plane_signing_key()),
             runner_result_verify_key: dev_runner_result_verify_key(),
             node_sequences: Arc::new(Mutex::new(HashMap::new())),
-            consumed_registration_tokens: Arc::new(Mutex::new(HashSet::new())),
+            registration_tokens: seeded_registration_tokens(registration_token),
             runner_results: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -135,12 +132,26 @@ fn dev_runner_result_verify_key() -> VerifyingKey {
     VerifyingKey::from(&SigningKey::from_bytes(&[22u8; 32]))
 }
 
+fn seeded_registration_tokens(
+    token: String,
+) -> Arc<Mutex<HashMap<String, RegistrationTokenRecord>>> {
+    let token_record = RegistrationTokenRecord::new("regtok-dev", token);
+    Arc::new(Mutex::new(HashMap::from([(
+        token_record.token_id.clone(),
+        token_record,
+    )])))
+}
+
 const DEV_REALITY_PRIVATE_KEY: &str = "qKQ2RRX4uDMX5W-8JbyE8lcl3TVGeM5KAwkbTnEX1VM";
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/nodes", get(list_nodes))
+        .route(
+            "/nodes/registration-tokens",
+            get(list_registration_tokens).post(issue_registration_token),
+        )
         .route("/nodes/register", post(register_node))
         .route(
             "/nodes/{node_id}/runner-result-key/rotate",
@@ -234,6 +245,45 @@ struct ListNodesResponse {
     nodes: Vec<NodeRecord>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RegistrationTokenRecord {
+    token_id: String,
+    token: String,
+    status: String,
+    created_at: chrono::DateTime<Utc>,
+    consumed_at: Option<chrono::DateTime<Utc>>,
+    used_by_node_id: Option<String>,
+}
+
+impl RegistrationTokenRecord {
+    fn new(token_id: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            token_id: token_id.into(),
+            token: token.into(),
+            status: "active".into(),
+            created_at: Utc::now(),
+            consumed_at: None,
+            used_by_node_id: None,
+        }
+    }
+
+    fn mark_used(&mut self, node_id: &str) {
+        self.status = "used".into();
+        self.consumed_at = Some(Utc::now());
+        self.used_by_node_id = Some(node_id.into());
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ListRegistrationTokensResponse {
+    tokens: Vec<RegistrationTokenRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueRegistrationTokenRequest {
+    token: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RotateRunnerResultKeyRequest {
     runner_result_public_key_hex: String,
@@ -250,20 +300,22 @@ async fn register_node(
     State(state): State<AppState>,
     Json(req): Json<RegisterNodeRequest>,
 ) -> Result<(StatusCode, Json<RegisterNodeResponse>), (StatusCode, String)> {
-    if req.registration_token != state.registration_token {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "invalid registration token".into(),
-        ));
-    }
     {
-        let mut consumed = state.consumed_registration_tokens.lock().await;
-        if !consumed.insert(req.registration_token.clone()) {
+        let mut tokens = state.registration_tokens.lock().await;
+        let token = tokens
+            .values_mut()
+            .find(|token| token.token == req.registration_token)
+            .ok_or((
+                StatusCode::UNAUTHORIZED,
+                "invalid registration token".into(),
+            ))?;
+        if token.status != "active" {
             return Err((
                 StatusCode::CONFLICT,
                 "registration token already consumed".into(),
             ));
         }
+        token.mark_used(&req.node_id);
     }
     let runner_result_public_key_hex = req
         .runner_result_public_key_hex
@@ -295,6 +347,29 @@ async fn list_nodes(State(state): State<AppState>) -> impl IntoResponse {
         Ok(nodes) => Json(ListNodesResponse { nodes }).into_response(),
         Err(error) => to_http_error(error).into_response(),
     }
+}
+
+async fn list_registration_tokens(State(state): State<AppState>) -> impl IntoResponse {
+    let tokens = state.registration_tokens.lock().await;
+    let mut tokens = tokens.values().cloned().collect::<Vec<_>>();
+    tokens.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    Json(ListRegistrationTokensResponse { tokens })
+}
+
+async fn issue_registration_token(
+    State(state): State<AppState>,
+    Json(req): Json<IssueRegistrationTokenRequest>,
+) -> impl IntoResponse {
+    let token = req
+        .token
+        .unwrap_or_else(|| format!("node-reg-{}", Uuid::new_v4()));
+    let mut tokens = state.registration_tokens.lock().await;
+    if tokens.values().any(|record| record.token == token) {
+        return (StatusCode::CONFLICT, "registration token already exists").into_response();
+    }
+    let record = RegistrationTokenRecord::new(format!("regtok-{}", Uuid::new_v4()), token);
+    tokens.insert(record.token_id.clone(), record.clone());
+    (StatusCode::CREATED, Json(record)).into_response()
 }
 
 async fn rotate_runner_result_key(
